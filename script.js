@@ -1213,7 +1213,7 @@ function updateScore() {
 
 // コンボ増加時にスケールアニメーションをトリガー
 function triggerComboAnimation() {
-    comboScaleTarget = 1.05;
+    comboScaleTarget = 1.1;
     comboScale = 1.0;
 }
 
