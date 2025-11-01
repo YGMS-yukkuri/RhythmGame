@@ -333,7 +333,7 @@ function drawLongNote(longNote, currentTime) {
     
     // 開始位置のノート（判定ライン付近・下側）
     if (startY >= -50 && startY <= canvas.height) {
-        ctx.fillStyle = longNote.critical ? "orange" : "cyan";
+        ctx.fillStyle = longNote.critical ? "rgba(255, 165, 0, 0.6)" : "rgba(0, 255, 255, 0.6)";
         ctx.fillRect(x, startY - 10, width, 20);
     }
     
@@ -366,9 +366,10 @@ function handleMisses(currentTime) {
     }
 }
 
-// 通常ノーツとロングノーツの統合判定（最も近いノーツのみ処理）
+// 通常ノーツとロングノーツの統合判定（重なったノーツを一度に処理）
 function handleAllNotes(currentTime, laneIndex) {
     const hitWindow = judge.bad;
+    const simultaneousThreshold = 0.001; // 1ms以内は同時とみなす
     
     // 該当レーンの通常ノーツを抽出
     const targetNotes = notes.filter(note =>
@@ -384,17 +385,19 @@ function handleAllNotes(currentTime, laneIndex) {
         Math.abs(ln.startTime - currentTime) <= hitWindow
     );
     
-    // 通常ノーツとロングノーツを統合し、最も近いものを選択
-    let closestNote = null;
+    if (targetNotes.length === 0 && targetLongNotes.length === 0) {
+        return; // 処理するノーツがない
+    }
+    
+    // 通常ノーツとロングノーツを統合し、最も近いものを見つける
+    let closestTime = Infinity;
     let closestDelta = Infinity;
-    let isLongNote = false;
     
     for (const note of targetNotes) {
         const delta = Math.abs(note.time - currentTime);
         if (delta < closestDelta) {
             closestDelta = delta;
-            closestNote = note;
-            isLongNote = false;
+            closestTime = note.time;
         }
     }
     
@@ -402,18 +405,26 @@ function handleAllNotes(currentTime, laneIndex) {
         const delta = Math.abs(ln.startTime - currentTime);
         if (delta < closestDelta) {
             closestDelta = delta;
-            closestNote = ln;
-            isLongNote = true;
+            closestTime = ln.startTime;
         }
     }
     
-    // 最も近いノーツを処理
-    if (closestNote) {
-        if (isLongNote) {
-            handleLongNoteStart(currentTime, closestNote);
-        } else {
-            handleSingleNote(currentTime, closestNote);
-        }
+    // 最も近いノーツと同時（simultaneousThreshold以内）のノーツをすべて処理
+    const notesToProcess = targetNotes.filter(note =>
+        Math.abs(note.time - closestTime) <= simultaneousThreshold
+    );
+    
+    const longNotesToProcess = targetLongNotes.filter(ln =>
+        Math.abs(ln.startTime - closestTime) <= simultaneousThreshold
+    );
+    
+    // 同時ノーツをすべて処理
+    for (const note of notesToProcess) {
+        handleSingleNote(currentTime, note);
+    }
+    
+    for (const ln of longNotesToProcess) {
+        handleLongNoteStart(currentTime, ln);
     }
 }
 
@@ -811,6 +822,9 @@ function handleLongNoteStart(currentTime, ln) {
 
 // ロングノーツ判定処理（ホールド中とMISS判定のみ）
 function handleLongNotes(currentTime) {
+    const simultaneousThreshold = 0.010; // 10ms以内は同時とみなす
+    const processedMissTimes = new Set(); // 処理済みのMISS時刻を記録
+    
     for (let i = longNotes.length - 1; i >= 0; i--) {
         const ln = longNotes[i];
         
@@ -820,13 +834,40 @@ function handleLongNotes(currentTime) {
         // 開始判定を逃した場合はMISS（キー押下なしで通過した場合）
         if (!ln.active && !ln.missed) {
             if (ln.startTime < currentTime - judge.bad) {
-                // 開始MISS + 未チェックのチェックポイント分もMISS
-                const uncheckedCount = ln.checkpoints.filter(cp => !cp.checked).length;
-                missCount += 1 + uncheckedCount;
-                isMiss = true;
-                missTextTimer = 30;
-                NowCombo = 0;
-                longNotes.splice(i, 1);
+                // 同じタイミングのロングノーツをまとめて処理
+                const startTimeKey = Math.round(ln.startTime / simultaneousThreshold);
+                
+                if (!processedMissTimes.has(`${lane}_${startTimeKey}`)) {
+                    processedMissTimes.add(`${lane}_${startTimeKey}`);
+                    
+                    // 同じタイミングの全てのロングノーツをMISSとして処理
+                    const simultaneousLongNotes = longNotes.filter(other =>
+                        other.startLane === lane &&
+                        !other.active &&
+                        !other.missed &&
+                        Math.abs(other.startTime - ln.startTime) <= simultaneousThreshold &&
+                        other.startTime < currentTime - judge.bad
+                    );
+                    
+                    // まとめてMISSカウント
+                    for (const missedLn of simultaneousLongNotes) {
+                        const uncheckedCount = missedLn.checkpoints.filter(cp => !cp.checked).length;
+                        missCount += 1 + uncheckedCount;
+                        
+                        // 配列から削除
+                        const idx = longNotes.indexOf(missedLn);
+                        if (idx > -1) {
+                            longNotes.splice(idx, 1);
+                            if (idx <= i) i--; // インデックス調整
+                        }
+                    }
+                    
+                    if (simultaneousLongNotes.length > 0) {
+                        isMiss = true;
+                        missTextTimer = 30;
+                        NowCombo = 0;
+                    }
+                }
                 continue;
             }
         }
