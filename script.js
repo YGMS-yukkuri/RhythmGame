@@ -2,6 +2,7 @@ let audioSource = null; // ← AudioSourceNode を保持
 let animationId = null; // ← requestAnimationFrame ID を保持
 let noteTapBuffer = null;
 let noteTapExBuffer = null;
+let guideBuffer = null; // ガイド音用
 
 let judge = null; // 判定幅を格納する変数
 
@@ -29,6 +30,7 @@ let maxcombo = 0;
 let NowCombo = 0;
 let comboScale = 1.0; // コンボ表示のスケール
 let comboScaleTarget = 1.0; // 目標スケール
+let guidedNotes = new Set(); // ガイド音を鳴らしたノーツを記録
 let perfectCount = 0;
 let greatCount = 0;
 let badCount = 0;
@@ -162,6 +164,14 @@ function loadAndStart() {
         .then(buf => audioCtx.decodeAudioData(buf))
         .then(decoded => {
             noteTapBuffer = decoded;
+        });
+
+    // ガイド音をロード
+    fetch('./data/system/guide.wav')
+        .then(res => res.arrayBuffer())
+        .then(buf => audioCtx.decodeAudioData(buf))
+        .then(decoded => {
+            guideBuffer = decoded;
         });
 
     fetch(chartData)
@@ -1162,6 +1172,7 @@ function gameLoop() {
         return; // ゲームループを終了
     }
 
+    checkGuideSound(elapsed); // ガイド音チェック
     handleHits(elapsed);
     handleLongNotes(elapsed); // ロングノーツ判定追加
     drawHitText();
@@ -1244,4 +1255,39 @@ function playNoteTap(type) {
     src.buffer = noteTapBuffer;
     src.connect(gainNode);
     src.start();
+}
+
+function playGuideSound() {
+    if (!guideBuffer) return;
+    const src = audioCtx.createBufferSource();
+    src.buffer = guideBuffer;
+    src.connect(gainNode);
+    src.start();
+}
+
+// ノーツが判定ラインを通過するタイミングでガイド音を鳴らす
+function checkGuideSound(currentTime) {
+    // 通常ノーツのチェック
+    for (const note of notes) {
+        const delta = note.time - currentTime;
+        // ノーツIDを生成（時間+レーン）
+        const noteId = `${note.time}_${note.lane}`;
+
+        // ±5msの範囲で判定ラインを通過したらガイド音を鳴らす
+        if (Math.abs(delta) < 0.010 && !guidedNotes.has(noteId)) {
+            playGuideSound();
+            guidedNotes.add(noteId);
+        }
+    }
+    
+    // ロングノーツの開始点のチェック
+    for (const ln of longNotes) {
+        const delta = ln.startTime - currentTime;
+        const noteId = `long_${ln.startTime}_${ln.lane}`;
+        
+        if (Math.abs(delta) < 0.010 && !guidedNotes.has(noteId)) {
+            playGuideSound();
+            guidedNotes.add(noteId);
+        }
+    }
 }
