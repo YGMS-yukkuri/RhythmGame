@@ -261,6 +261,9 @@ function startGame() {
     let temp = document.getElementById("hispeed").value;
     noteSpeed = temp;
     isPlaying = true;
+    // ガイド音の状態をクリア（前回のプレイの残滓を取り除く）
+    guidedNotes.clear();
+    guideLastDelta.clear();
 
     // 既存のaudioSourceがあれば停止・切断
     if (audioSource) {
@@ -1057,6 +1060,8 @@ function resetGame() {
     notes = [];
     longNotes = [];
     heldLanes.clear();
+    guidedNotes.clear();
+    guideLastDelta.clear();
     perfectCount = 0;
     greatCount = 0;
     badCount = 0;
