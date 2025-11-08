@@ -31,6 +31,7 @@ let NowCombo = 0;
 let comboScale = 1.0; // コンボ表示のスケール
 let comboScaleTarget = 1.0; // 目標スケール
 let guidedNotes = new Set(); // ガイド音を鳴らしたノーツを記録
+let guideLastDelta = new Map(); // ノーツごとの直前のdeltaを保持（ゼロクロス検出用）
 let perfectCount = 0;
 let greatCount = 0;
 let badCount = 0;
@@ -317,6 +318,10 @@ function drawLongNote(longNote, currentTime) {
     const lane = longNote.startLane;
     const x = lane * laneWidth + 10;
     const width = laneWidth - 20;
+    const isHeldNow = longNote.active && heldLanes.has(lane); // 現在プレイヤーがそのレーンを保持しているか
+    // 表示中（画面に流れている）かどうかの判定
+    const isOnScreen = !(startY > canvas.height || endY < -50);
+    const isFlowing = isOnScreen && !longNote.active; // 画面上にありつつまだ開始されていない＝流れてくる途中
     
     // ロングノーツは endY（終点・上側） から startY（始点・下側）まで描画
     // 描画範囲を画面内に収める
@@ -325,25 +330,41 @@ function drawLongNote(longNote, currentTime) {
     
     // ロングノーツ本体（縦長の矩形）- 常に描画
     if (drawBottomY > drawTopY) {
-        // ロングノーツの色（active状態で変化）
-        if (longNote.active) {
-            ctx.fillStyle = longNote.critical ? "rgba(255, 165, 0, 0.6)" : "rgba(0, 255, 255, 0.6)";
+        // ロングノーツの色（押しているときはアクティブ、流れている間は中間透明度、非アクティブは薄め）
+        if (isHeldNow) {
+            ctx.fillStyle = longNote.critical ? "rgba(255, 165, 0, 0.85)" : "rgba(0, 255, 255, 0.85)";
+        } else if (isFlowing) {
+            // 流れてくる間はアクティブと非アクティブの中間くらいの透明度
+            ctx.fillStyle = longNote.critical ? "rgba(255, 180, 0, 0.6)" : "rgba(80, 220, 255, 0.6)";
         } else {
-            ctx.fillStyle = longNote.critical ? "rgba(255, 200, 0, 0.5)" : "rgba(100, 200, 255, 0.5)";
+            ctx.fillStyle = longNote.critical ? "rgba(255, 200, 0, 0.45)" : "rgba(100, 200, 255, 0.45)";
         }
         
         // 本体の描画（上から下へ）
         ctx.fillRect(x, drawTopY, width, drawBottomY - drawTopY);
         
-        // 枠線を追加（より見やすく）
-        ctx.strokeStyle = longNote.critical ? "orange" : "cyan";
+        // 枠線を追加（押しているときはハイライトを強め、流れている間は少し柔らかめに）
+        if (isHeldNow) {
+            ctx.strokeStyle = longNote.critical ? "orange" : "cyan";
+        } else if (isFlowing) {
+            ctx.strokeStyle = longNote.critical ? "rgba(255,140,0,0.9)" : "rgba(0,180,255,0.9)";
+        } else {
+            ctx.strokeStyle = longNote.critical ? "rgba(255,165,0,0.9)" : "rgba(0,200,255,0.7)";
+        }
         ctx.lineWidth = 2;
         ctx.strokeRect(x, drawTopY, width, drawBottomY - drawTopY);
     }
     
     // 開始位置のノート（判定ライン付近・下側）
     if (startY >= -50 && startY <= canvas.height) {
-        ctx.fillStyle = longNote.critical ? "rgba(255, 165, 0, 0.6)" : "rgba(0, 255, 255, 0.6)";
+        // 始点は判定ライン付近なので、押しているときはアクティブ色、押されていない場合は流れてくる色か非アクティブ色
+        if (isHeldNow) {
+            ctx.fillStyle = longNote.critical ? "rgba(255, 165, 0, 0.85)" : "rgba(0, 255, 255, 0.85)";
+        } else if (isFlowing) {
+            ctx.fillStyle = longNote.critical ? "rgba(255, 180, 0, 0.6)" : "rgba(80, 220, 255, 0.6)";
+        } else {
+            ctx.fillStyle = longNote.critical ? "rgba(255, 200, 0, 0.45)" : "rgba(100, 200, 255, 0.45)";
+        }
         ctx.fillRect(x, startY - 10, width, 20);
     }
     
@@ -895,13 +916,14 @@ function handleLongNotes(currentTime) {
                         triggerComboAnimation();
                     } else {
                         // キーが離されていた場合はMISS
-                        // 未チェックのチェックポイント分をすべてMISS
-                        const remainingUnchecked = ln.checkpoints.filter(cp => !cp.checked).length;
-                        missCount += remainingUnchecked;
+                        // 現在のチェックポイントが未チェックで既に時間を過ぎている場合、そのポイントのみMISSとして扱う
+                        checkpoint.checked = true; // 再度カウントしないようにチェック済みにする
+                        missCount += 1;
                         isMiss = true;
                         missTextTimer = 30;
                         NowCombo = 0;
-                        longNotes.splice(i, 1);
+                        // NOTE: ロングノーツ自体は削除せず、後続のチェックポイントは押し直しで拾えるようにする
+                        // 続けて次のチェックポイントの判定を行う
                         continue;
                     }
                 }
@@ -1259,35 +1281,66 @@ function playNoteTap(type) {
 
 function playGuideSound() {
     if (!guideBuffer) return;
+    // AudioContext がサスペンド中の場合は再開を試みる
+    if (audioCtx.state === 'suspended') {
+        audioCtx.resume().catch(e => console.warn('audioCtx.resume failed:', e));
+    }
     const src = audioCtx.createBufferSource();
     src.buffer = guideBuffer;
     src.connect(gainNode);
     src.start();
+    // 再生完了後にdisconnectして GC を助ける
+    src.onended = () => {
+        try { src.disconnect(); } catch (e) { }
+    };
 }
 
 // ノーツが判定ラインを通過するタイミングでガイド音を鳴らす
 function checkGuideSound(currentTime) {
-    // 通常ノーツのチェック
+    // 通常ノーツのチェック（ゼロクロス検出でより確実に拾う）
+    const threshold = 0.03; // フレームの遅延対策に少し広めの閾値（30ms）を利用
     for (const note of notes) {
         const delta = note.time - currentTime;
-        // ノーツIDを生成（時間+レーン）
         const noteId = `${note.time}_${note.lane}`;
+        const prev = guideLastDelta.get(noteId);
 
-        // ±5msの範囲で判定ラインを通過したらガイド音を鳴らす
-        if (Math.abs(delta) < 0.010 && !guidedNotes.has(noteId)) {
+        let shouldPlay = false;
+        // 直前のフレームではまだ到達しておらず、今回のフレームで判定ラインを越えた（正から負へ）場合
+        if (prev !== undefined && prev > 0 && delta <= 0) {
+            shouldPlay = true;
+        }
+        // prev がない場合やフレームスキップで一気に通過する可能性があるため、閾値内も許容
+        if (Math.abs(delta) <= threshold && !guidedNotes.has(noteId)) {
+            shouldPlay = true;
+        }
+
+        if (shouldPlay && !guidedNotes.has(noteId)) {
             playGuideSound();
             guidedNotes.add(noteId);
         }
+
+        guideLastDelta.set(noteId, delta);
     }
-    
-    // ロングノーツの開始点のチェック
+
+    // ロングノーツの開始点のチェック（同様にゼロクロスで検出）
     for (const ln of longNotes) {
         const delta = ln.startTime - currentTime;
-        const noteId = `long_${ln.startTime}_${ln.lane}`;
-        
-        if (Math.abs(delta) < 0.010 && !guidedNotes.has(noteId)) {
+        const noteId = `long_${ln.startTime}_${ln.startLane}`;
+        const prev = guideLastDelta.get(noteId);
+
+        let shouldPlay = false;
+        if (prev !== undefined && prev > 0 && delta <= 0) {
+            shouldPlay = true;
+        }
+        if (Math.abs(delta) <= threshold && !guidedNotes.has(noteId)) {
+            shouldPlay = true;
+        }
+
+        if (shouldPlay && !guidedNotes.has(noteId)) {
             playGuideSound();
             guidedNotes.add(noteId);
         }
+
+        guideLastDelta.set(noteId, delta);
     }
 }
